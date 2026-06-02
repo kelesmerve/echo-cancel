@@ -1,0 +1,38 @@
+version: '3.8'
+
+services:
+  # Kullanıcı profilleri için ilişkisel veritabanı
+  postgres:
+    image: postgres:15-alpine
+    container_name: echo-cancel-postgres
+    environment:
+      POSTGRES_USER: ${DB_USER:-admin}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-password123}
+      POSTGRES_DB: ${DB_NAME:-userprofile_db}
+    ports:
+      - "5433:5432"
+
+  # Idempotency anahtarları için bellek içi önbellek
+  redis:
+    image: redis:7-alpine
+    container_name: echo-cancel-redis
+    ports:
+      - "6379:6379"
+
+  # Asenkron olay iletimi için mesaj aracısı (Yönetim arayüzü dahil)
+  rabbitmq:
+    image: rabbitmq:3-management-alpine
+    container_name: echo-cancel-rabbitmq
+    ports:
+      - "5672:5672"   # Servislerin bağlanacağı port
+      - "15672:15672" # Tarayıcıdan erişilebilen yönetim arayüzü portu
+
+  # Dinamik ilgi ağırlıklandırma grafı için veritabanı
+  neo4j:
+    image: neo4j:5
+    container_name: echo-cancel-neo4j
+    environment:
+      NEO4J_AUTH: ${NEO4J_USER:-neo4j}/${NEO4J_PASSWORD:-password123}
+    ports:
+      - "7474:7474"   # Tarayıcıdan erişilebilen HTTP arayüzü
+      - "7687:7687"   # Servislerin bağlanacağı Bolt protokolü portu

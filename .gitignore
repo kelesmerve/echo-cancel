@@ -1,0 +1,17 @@
+# Node.js Bağımlılıkları ve Derlenmiş Dosyalar
+node_modules/
+dist/
+npm-debug.log*
+
+# Go Derlenmiş Çalıştırılabilir Dosyaları
+*.exe
+interaction-ingestion/interaction-ingestion
+
+# Ortam Değişkenleri ve Gizli Dosyalar 
+.env
+.env.local
+
+# İşletim Sistemi ve Editör Kalıntıları
+.vscode/
+.DS_Store
+Thumbs.db
