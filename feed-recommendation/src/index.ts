@@ -1,13 +1,14 @@
+import dotenv from 'dotenv';
+dotenv.config();
+
 import express from 'express';
 import neo4j from 'neo4j-driver';
-import dotenv from 'dotenv';
 import cors from 'cors';
-
-dotenv.config();
 
 const app = express();
 // API Gateway 3003 portuna yönlendirme yapıyor
-const PORT = process.env.PORT || 3003;
+
+const PORT = 3003; // .env'deki 3000'i ezmek için doğrudan 3003 verdik
 
 app.use(cors());
 app.use(express.json());
@@ -17,7 +18,7 @@ const driver = neo4j.driver(
     process.env.NEO4J_URI || 'bolt://localhost:7687',
     neo4j.auth.basic(
         process.env.NEO4J_USER || 'neo4j', 
-        process.env.NEO4J_PASSWORD || ''
+        process.env.NEO4J_PASSWORD || 'password123'
     )
 );
 
@@ -30,15 +31,62 @@ driver.getServerInfo()
         console.error('Neo4j connection error:', error);
     });
 
-// Temel endpoint
+// Senin mevcut temel endpoint'in (Sağlık kontrolü için kalabilir)
 app.get('/', (req, res) => {
-    // Zero-Trust: API Gateway'den gelen kimlik doğrulanmış UUID
     const userUuid = req.headers['x-user-uuid'];
-    
     res.status(200).json({ 
         message: 'Feed Recommendation Service is running',
         authenticatedUser: userUuid || 'No authenticated user UUID received'
     });
+});
+
+// YENİ EKLENEN: Ana Akış (Feed) Endpoint'i - Echo Cancel Algoritması
+app.get('/api/feed', async (req, res) => {
+    // Zero-Trust: API Gateway'den gelen user UUID
+    const userId = req.headers['x-user-uuid'] as string || 'test-user-uuid-1234';
+
+    const session = driver.session();
+    try {
+        // Yankı Fanusunu Kıran Cypher Sorgusu
+        // 1. Kullanıcının ilgi duyduğu (weight > 0) en güçlü 2 kategoriyi getir.
+        // 2. Kullanıcının bağının ZAYIF olduğu veya HİÇ OLMADIĞI 1 rastgele kategori getir.
+        const query = `
+            // Bölüm 1: Kişiselleştirilmiş (Favoriler)
+            MATCH (u:User {id: $userId})-[r:INTERESTED_IN]->(c:Category)
+            WITH c.name AS category, r.weight AS weight
+            ORDER BY weight DESC
+            LIMIT 2
+            WITH collect({category: category, type: 'personalized', weight: weight}) AS personalizedItems
+
+            // Bölüm 2: Fanus Kırıcı (Keşif)
+            MATCH (allCat:Category)
+            WHERE NOT EXISTS {
+                MATCH (u:User {id: $userId})-[r2:INTERESTED_IN]->(allCat)
+                WHERE r2.weight > 0.5
+            }
+            WITH allCat.name AS category, rand() AS randomSort, personalizedItems
+            ORDER BY randomSort
+            LIMIT 1
+            WITH personalizedItems, collect({category: category, type: 'discovery', weight: 'N/A'}) AS discoveryItems
+
+            // İkisini birleştir ve feed olarak döndür
+            RETURN personalizedItems + discoveryItems AS feed
+        `;
+
+        const result = await session.run(query, { userId });
+        const feed = result.records[0]?.get('feed') || [];
+
+        res.json({
+            userId,
+            message: "Here is your echo-cancelled feed",
+            feed
+        });
+    } catch (error) {
+        console.error('[Feed] Error fetching feed:', error);
+        res.status(500).json({ error: 'Internal server error' });
+    } finally {
+        await session.close();
+    }
 });
 
 app.listen(PORT, () => {
