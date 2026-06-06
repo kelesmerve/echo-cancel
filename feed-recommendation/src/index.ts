@@ -6,8 +6,6 @@ import neo4j from 'neo4j-driver';
 import cors from 'cors';
 
 const app = express();
-// API Gateway 3003 portuna yönlendirme yapıyor
-
 const PORT = 3003; // .env'deki 3000'i ezmek için doğrudan 3003 verdik
 
 app.use(cors());
@@ -31,25 +29,20 @@ driver.getServerInfo()
         console.error('Neo4j connection error:', error);
     });
 
-// Senin mevcut temel endpoint'in (Sağlık kontrolü için kalabilir)
-app.get('/', (req, res) => {
-    const userUuid = req.headers['x-user-uuid'];
+// Sağlık kontrolü endpoint'i
+app.get('/health', (req, res) => {
     res.status(200).json({ 
-        message: 'Feed Recommendation Service is running',
-        authenticatedUser: userUuid || 'No authenticated user UUID received'
+        message: 'Feed Recommendation Service is running'
     });
 });
 
-// YENİ EKLENEN: Ana Akış (Feed) Endpoint'i - Echo Cancel Algoritması
-app.get('/api/feed', async (req, res) => {
+// Asıl Algoritma Endpoint'i (Kök dizinde çalışır)
+app.get('/', async (req, res) => {
     // Zero-Trust: API Gateway'den gelen user UUID
     const userId = req.headers['x-user-uuid'] as string || 'test-user-uuid-1234';
 
     const session = driver.session();
     try {
-        // Yankı Fanusunu Kıran Cypher Sorgusu
-        // 1. Kullanıcının ilgi duyduğu (weight > 0) en güçlü 2 kategoriyi getir.
-        // 2. Kullanıcının bağının ZAYIF olduğu veya HİÇ OLMADIĞI 1 rastgele kategori getir.
         const query = `
             // Bölüm 1: Kişiselleştirilmiş (Favoriler)
             MATCH (u:User {id: $userId})-[r:INTERESTED_IN]->(c:Category)

@@ -1,11 +1,10 @@
 import dotenv from 'dotenv';
-
 dotenv.config();
+
 import express from 'express';
 import cors from 'cors';
 import { createProxyMiddleware } from 'http-proxy-middleware';
 import { verifyToken } from './middlewares/auth';
-
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -13,7 +12,6 @@ const PORT = process.env.PORT || 3000;
 app.use(cors());
 
 // Yönlendirme (Routing) Tanımlamaları
-// Her bir mikroservisin çalışacağı yerel portları belirliyoruz.
 
 // 1. User Profile Service Yönlendirmesi
 app.use('/api/users', verifyToken, createProxyMiddleware({
@@ -25,6 +23,7 @@ app.use('/api/users', verifyToken, createProxyMiddleware({
 app.use('/api/interactions', verifyToken, createProxyMiddleware({
     target: 'http://localhost:3002',
     changeOrigin: true,
+    pathRewrite: { '^/api/interactions': '/' } // Go servisine sadece / olarak gitmesi için eklendi
 }));
 
 // 3. Feed Recommendation Service Yönlendirmesi
