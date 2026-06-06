@@ -15,3 +15,8 @@ interaction-ingestion/interaction-ingestion
 .vscode/
 .DS_Store
 Thumbs.db
+
+# Analiz ve Dokümantasyon Dosyaları (Proje dışı)
+echo_cancel_analiz.md
+echo_cancel_detayli_aciklama.md
+eksiklik_analizi.md
