@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
@@ -13,14 +14,20 @@ import (
 
 var ctx = context.Background()
 
+// Gelen etkileşim verisinin yapısı
+type Interaction struct {
+	UserID   string `json:"userId"`
+	Category string `json:"category"`
+	Action   string `json:"action"`
+}
+
 func main() {
-	// Redis adresini ortam değişkeninden al
+	// 1. Redis Bağlantısı
 	redisAddr := os.Getenv("REDIS_ADDR")
 	if redisAddr == "" {
 		redisAddr = "localhost:6379"
 	}
 
-	// 1. Redis Bağlantısı (Idempotency için)
 	rdb := redis.NewClient(&redis.Options{
 		Addr: redisAddr,
 	})
@@ -31,7 +38,7 @@ func main() {
 	}
 	fmt.Println("Redis connected successfully")
 
-	// 2. RabbitMQ Bağlantısı (Asenkron mesajlaşma için)
+	// 2. RabbitMQ Bağlantısı
 	rabbitURL := os.Getenv("RABBITMQ_URL")
 	if rabbitURL == "" {
 		rabbitURL = "amqp://guest:guest@localhost:5672/"
@@ -44,10 +51,72 @@ func main() {
 	defer conn.Close()
 	fmt.Println("RabbitMQ connected successfully")
 
-	// 3. HTTP Sunucusu (API Gateway üzerinden gelen istekleri karşılar)
+	// RabbitMQ Kanalı Oluştur
+	ch, err := conn.Channel()
+	if err != nil {
+		log.Fatalf("Failed to open a channel: %v", err)
+	}
+	defer ch.Close()
+
+	// Kuyruğu Tanımla
+	q, err := ch.QueueDeclare(
+		"interaction_events", // Kuyruk adı
+		true,                 // Durable (Kalıcı)
+		false,                // Delete when unused
+		false,                // Exclusive
+		false,                // No-wait
+		nil,                  // Arguments
+	)
+	if err != nil {
+		log.Fatalf("Failed to declare a queue: %v", err)
+	}
+
+	// 3. HTTP Sunucusu
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		// Zero-Trust: API Gateway'in eklediği header
 		userUUID := r.Header.Get("x-user-uuid")
+		if userUUID == "" {
+			userUUID = "test-user-uuid-1234" // Test için fallback
+		}
+
+		// Sadece POST isteklerini kabul et
+		if r.Method == http.MethodPost {
+			var interaction Interaction
+			err := json.NewDecoder(r.Body).Decode(&interaction)
+			if err != nil {
+				http.Error(w, "Invalid JSON payload", http.StatusBadRequest)
+				return
+			}
+
+			// Güvenlik: Header'dan gelen UserID'yi ezici olarak kullan
+			interaction.UserID = userUUID
+
+			// JSON formatına geri çevir
+			body, err := json.Marshal(interaction)
+			if err != nil {
+				http.Error(w, "Failed to encode message", http.StatusInternalServerError)
+				return
+			}
+
+			// RabbitMQ'ya gönder (Publish)
+			err = ch.Publish(
+				"",     // Exchange
+				q.Name, // Routing key (kuyruk adı)
+				false,  // Mandatory
+				false,  // Immediate
+				amqp.Publishing{
+					ContentType: "application/json",
+					Body:        body,
+				})
+			if err != nil {
+				http.Error(w, "Failed to publish a message", http.StatusInternalServerError)
+				return
+			}
+
+			w.WriteHeader(http.StatusOK)
+			fmt.Fprintf(w, "Interaction recorded and sent to queue")
+			return
+		}
 
 		w.WriteHeader(http.StatusOK)
 		fmt.Fprintf(w, "Interaction Ingestion Service is running. Authenticated User: %s", userUUID)
@@ -56,7 +125,6 @@ func main() {
 	port := ":3002"
 	fmt.Printf("Interaction Ingestion Service started on http://localhost%s\n", port)
 
-	// Sunucuyu başlat
 	if err := http.ListenAndServe(port, nil); err != nil {
 		log.Fatalf("Server failed to start: %v", err)
 	}
