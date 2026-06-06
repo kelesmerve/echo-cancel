@@ -7,6 +7,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"time"
 
 	"github.com/go-redis/redis/v8"
 	amqp "github.com/rabbitmq/amqp091-go"
@@ -14,7 +15,11 @@ import (
 
 var ctx = context.Background()
 
-// Gelen etkileşim verisinin yapısı
+// Backpressure için maksimum eşzamanlı istek limiti
+const maxConcurrentRequests = 100
+
+var semaphore = make(chan struct{}, maxConcurrentRequests)
+
 type Interaction struct {
 	UserID   string `json:"userId"`
 	Category string `json:"category"`
@@ -51,21 +56,19 @@ func main() {
 	defer conn.Close()
 	fmt.Println("RabbitMQ connected successfully")
 
-	// RabbitMQ Kanalı Oluştur
 	ch, err := conn.Channel()
 	if err != nil {
 		log.Fatalf("Failed to open a channel: %v", err)
 	}
 	defer ch.Close()
 
-	// Kuyruğu Tanımla
 	q, err := ch.QueueDeclare(
-		"interaction_events", // Kuyruk adı
-		true,                 // Durable (Kalıcı)
-		false,                // Delete when unused
-		false,                // Exclusive
-		false,                // No-wait
-		nil,                  // Arguments
+		"interaction_events",
+		true,
+		false,
+		false,
+		false,
+		nil,
 	)
 	if err != nil {
 		log.Fatalf("Failed to declare a queue: %v", err)
@@ -73,53 +76,91 @@ func main() {
 
 	// 3. HTTP Sunucusu
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		// Zero-Trust: API Gateway'in eklediği header
-		userUUID := r.Header.Get("x-user-uuid")
-		if userUUID == "" {
-			userUUID = "test-user-uuid-1234" // Test için fallback
+		// Backpressure Kontrolü
+		select {
+		case semaphore <- struct{}{}:
+			// İşlem bitince semaforu serbest bırak
+			defer func() { <-semaphore }()
+		default:
+			// Semafor doluysa (Sistem aşırı yüklü) 503 dön
+			http.Error(w, "Service Unavailable - System Overloaded", http.StatusServiceUnavailable)
+			return
 		}
 
-		// Sadece POST isteklerini kabul et
-		if r.Method == http.MethodPost {
-			var interaction Interaction
-			err := json.NewDecoder(r.Body).Decode(&interaction)
-			if err != nil {
-				http.Error(w, "Invalid JSON payload", http.StatusBadRequest)
-				return
-			}
-
-			// Güvenlik: Header'dan gelen UserID'yi ezici olarak kullan
-			interaction.UserID = userUUID
-
-			// JSON formatına geri çevir
-			body, err := json.Marshal(interaction)
-			if err != nil {
-				http.Error(w, "Failed to encode message", http.StatusInternalServerError)
-				return
-			}
-
-			// RabbitMQ'ya gönder (Publish)
-			err = ch.Publish(
-				"",     // Exchange
-				q.Name, // Routing key (kuyruk adı)
-				false,  // Mandatory
-				false,  // Immediate
-				amqp.Publishing{
-					ContentType: "application/json",
-					Body:        body,
-				})
-			if err != nil {
-				http.Error(w, "Failed to publish a message", http.StatusInternalServerError)
-				return
-			}
-
+		if r.Method != http.MethodPost {
 			w.WriteHeader(http.StatusOK)
-			fmt.Fprintf(w, "Interaction recorded and sent to queue")
+			fmt.Fprintf(w, "Interaction Ingestion Service is running.")
+			return
+		}
+
+		// Zero-Trust User ID Kontrolü
+		userUUID := r.Header.Get("x-user-uuid")
+		if userUUID == "" {
+			http.Error(w, "Unauthorized: Missing user UUID", http.StatusUnauthorized)
+			return
+		}
+
+		// Idempotency Key Kontrolü
+		idempotencyKey := r.Header.Get("Idempotency-Key")
+		if idempotencyKey == "" {
+			http.Error(w, "Bad Request: Missing Idempotency-Key header", http.StatusBadRequest)
+			return
+		}
+
+		// Redis üzerinden Idempotency kontrolü (24 saat TTL)
+		redisKey := "idempotency:" + idempotencyKey
+		exists, err := rdb.SetNX(ctx, redisKey, "processed", 24*time.Hour).Result()
+		if err != nil {
+			http.Error(w, "Internal Server Error: Redis check failed", http.StatusInternalServerError)
+			return
+		}
+
+		if !exists {
+			// Key zaten var. İstek daha önce işlenmiş (Duplicate).
+			// RabbitMQ'ya tekrar yazmadan başarılı yanıt dönüyoruz.
+			w.WriteHeader(http.StatusOK)
+			fmt.Fprintf(w, "Interaction already processed (Idempotent response)")
+			return
+		}
+
+		// JSON Parse İşlemi
+		var interaction Interaction
+		err = json.NewDecoder(r.Body).Decode(&interaction)
+		if err != nil {
+			// Hatalı veri durumunda Redis kaydını sil ki sistem düzeltilip tekrar denenebilsin
+			rdb.Del(ctx, redisKey)
+			http.Error(w, "Invalid JSON payload", http.StatusBadRequest)
+			return
+		}
+
+		interaction.UserID = userUUID
+
+		body, err := json.Marshal(interaction)
+		if err != nil {
+			rdb.Del(ctx, redisKey)
+			http.Error(w, "Failed to encode message", http.StatusInternalServerError)
+			return
+		}
+
+		// RabbitMQ'ya gönder (Publish)
+		err = ch.Publish(
+			"",
+			q.Name,
+			false,
+			false,
+			amqp.Publishing{
+				ContentType: "application/json",
+				Body:        body,
+			})
+		if err != nil {
+			// RabbitMQ'ya yazılamazsa Redis kaydını sil
+			rdb.Del(ctx, redisKey)
+			http.Error(w, "Failed to publish a message", http.StatusInternalServerError)
 			return
 		}
 
 		w.WriteHeader(http.StatusOK)
-		fmt.Fprintf(w, "Interaction Ingestion Service is running. Authenticated User: %s", userUUID)
+		fmt.Fprintf(w, "Interaction recorded and sent to queue")
 	})
 
 	port := ":3002"
