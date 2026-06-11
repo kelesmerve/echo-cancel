@@ -88,6 +88,29 @@ async function createNeo4jUserNode(userId: string, displayName: string) {
     }
 }
 
+// --- SAGA PATTERN: NEO4J KULLANICI DÜĞÜMÜNÜ (VE İLİŞKİLERİNİ) SİLME ---
+async function deleteNeo4jUserNode(userId: string) {
+    const session = neo4jDriver.session();
+    try {
+        // DETACH DELETE çok kritiktir: Sadece kullanıcıyı değil, 
+        // onun sahip olduğu tüm INTERESTED_IN (ilgi) bağlarını da siler.
+        const query = `
+            MATCH (u:User {id: $userId})
+            DETACH DELETE u
+        `;
+        await session.run(query, { userId });
+        
+        // Kullanıcının Feed Cache'ini de Redis'ten (DB 2) temizliyoruz
+        await feedCacheClient.del(`feed:${userId}`);
+        
+        console.log(`[Neo4j] Saga Telafisi tamamlandi: Kullanici (${userId}) ve tum baglari sistemden silindi.`);
+    } catch (error) {
+        console.error('[Neo4j] Dugum silme hatasi (Saga telafisi basarisiz):', error);
+    } finally {
+        await session.close();
+    }
+}
+
 // --- FATIGUE PENALTY & DIW ALGORİTMASI ---
 async function processInteraction(userId: string, category: string, action: string) {
     const session = neo4jDriver.session();
@@ -176,6 +199,9 @@ async function connectRabbitMQ() {
                         console.log(`[Saga Consumer] RabbitMQ'dan UserCreated eventi yakalandi: ${eventData.userId}`);
                         await createNeo4jUserNode(eventData.userId, eventData.displayName);
                         await cacheUserFeed(eventData.userId);
+                    } else if (eventData.eventType === 'UserDeleted') {
+                        console.log(`[Saga Consumer] RabbitMQ'dan UserDeleted eventi yakalandi: ${eventData.userId}`);
+                        await deleteNeo4jUserNode(eventData.userId);
                     }
                 } catch (err) {
                     console.error('[!] Saga mesaji islenemedi:', err);
