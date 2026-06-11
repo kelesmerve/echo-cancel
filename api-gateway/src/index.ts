@@ -5,11 +5,34 @@ import express from 'express';
 import cors from 'cors';
 import { createProxyMiddleware } from 'http-proxy-middleware';
 import { verifyToken } from './middlewares/auth';
+import jwt from 'jsonwebtoken';
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
 app.use(cors());
+
+// YALNIZCA GELİŞTİRME İÇİN: Bize testlerimizde kullanmak üzere JWT üreten endpoint
+app.post('/api/auth/dev-token', express.json(), (req, res) => {
+    const { userId } = req.body;
+    
+    if (!userId) {
+        return res.status(400).json({ error: 'Lütfen test için bir userId gönderin' });
+    }
+
+    const JWT_SECRET = process.env.JWT_SECRET;
+    if (!JWT_SECRET) {
+        return res.status(500).json({ error: 'Sunucuda JWT_SECRET eksik!' });
+    }
+
+    // Gönderdiğimiz userId ile imzalanmış, 1 gün geçerli gerçek bir token üretiyoruz
+    const token = jwt.sign({ userId }, JWT_SECRET, { expiresIn: '1d' });
+    
+    res.json({ 
+        message: "Test token'i basariyla uretildi",
+        token: token 
+    });
+});
 
 // Yönlendirme (Routing) Tanımlamaları
 

@@ -2,7 +2,7 @@ import dotenv from 'dotenv';
 dotenv.config();
 
 import express from 'express';
-import neo4j from 'neo4j-driver';
+// import neo4j from 'neo4j-driver';
 import cors from 'cors';
 import { createClient } from 'redis';
 
@@ -66,6 +66,8 @@ app.listen(PORT, () => {
     console.log(`Feed Recommendation Service started on http://localhost:${PORT}`);
 });
 
+/*
+NOT: Neo4j bağlantısı ve sorguları artık Graph Updater Service'e taşındığı için bu servis sadece Redis Cache'i kullanarak feed önerisi yapacak şekilde basitleştirildi.
 // Docker Compose dosyamızdaki Neo4j bağlantı bilgileri
 const driver = neo4j.driver(
     process.env.NEO4J_URI || 'bolt://localhost:7687',
@@ -140,3 +142,4 @@ app.get('/', async (req, res) => {
 app.listen(PORT, () => {
     console.log(`Feed Recommendation Service started on http://localhost:${PORT}`);
 });
+*/
