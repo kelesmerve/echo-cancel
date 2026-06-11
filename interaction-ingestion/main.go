@@ -2,12 +2,17 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
 	"os"
-	"time"
+
+	"interaction-ingestion/internal/model"
+	"interaction-ingestion/internal/repository"
+	"interaction-ingestion/internal/service"
+	"interaction-ingestion/internal/worker"
 
 	"github.com/go-redis/redis/v8"
 	amqp "github.com/rabbitmq/amqp091-go"
@@ -15,157 +20,126 @@ import (
 
 var ctx = context.Background()
 
-// Backpressure için maksimum eşzamanlı istek limiti
 const maxConcurrentRequests = 100
 
 var semaphore = make(chan struct{}, maxConcurrentRequests)
 
-type Interaction struct {
-	UserID   string `json:"userId"`
-	Category string `json:"category"`
-	Action   string `json:"action"`
-}
-
 func main() {
-	// 1. Redis Bağlantısı
+	// 1. PostgreSQL Connection (Connecting to ingestion_db on port 5434)
+	pgConnStr := os.Getenv("PG_URL")
+	if pgConnStr == "" {
+		pgConnStr = "postgres://admin:password123@localhost:5434/ingestion_db?sslmode=disable"
+	}
+	db, err := sql.Open("postgres", pgConnStr)
+	if err != nil {
+		log.Fatalf("Failed to open Postgres: %v", err)
+	}
+	defer db.Close()
+	if err := db.Ping(); err != nil {
+		log.Fatalf("Failed to connect to Postgres: %v", err)
+	}
+	fmt.Println("PostgreSQL connected successfully")
+
+	// 2. Redis Connection (Using DB 0 for Idempotency)
 	redisAddr := os.Getenv("REDIS_ADDR")
 	if redisAddr == "" {
 		redisAddr = "localhost:6379"
 	}
-
-	rdb := redis.NewClient(&redis.Options{
-		Addr: redisAddr,
-	})
-
-	_, err := rdb.Ping(ctx).Result()
-	if err != nil {
+	rdb := redis.NewClient(&redis.Options{Addr: redisAddr, DB: 0})
+	if _, err := rdb.Ping(ctx).Result(); err != nil {
 		log.Fatalf("Redis connection error: %v", err)
 	}
 	fmt.Println("Redis connected successfully")
 
-	// 2. RabbitMQ Bağlantısı
+	// 3. RabbitMQ Connection
 	rabbitURL := os.Getenv("RABBITMQ_URL")
 	if rabbitURL == "" {
 		rabbitURL = "amqp://guest:guest@localhost:5672/"
 	}
-
 	conn, err := amqp.Dial(rabbitURL)
 	if err != nil {
 		log.Fatalf("RabbitMQ connection error: %v", err)
 	}
 	defer conn.Close()
-	fmt.Println("RabbitMQ connected successfully")
 
 	ch, err := conn.Channel()
 	if err != nil {
-		log.Fatalf("Failed to open a channel: %v", err)
+		log.Fatalf("Failed to open RMQ channel: %v", err)
 	}
 	defer ch.Close()
 
-	q, err := ch.QueueDeclare(
-		"interaction_events",
-		true,
-		false,
-		false,
-		false,
-		nil,
-	)
+	q, err := ch.QueueDeclare("interaction_events", true, false, false, false, nil)
 	if err != nil {
-		log.Fatalf("Failed to declare a queue: %v", err)
+		log.Fatalf("Failed to declare queue: %v", err)
+	}
+	fmt.Println("RabbitMQ connected successfully")
+
+	// 4. Wire the Architecture Layers together
+	repo := repository.NewRepository(db, rdb)
+	err = repo.InitSchema() // Ensure outbox table exists
+	if err != nil {
+		log.Fatalf("Failed to initialize database schema: %v", err)
 	}
 
-	// 3. HTTP Sunucusu
+	interactionService := service.NewInteractionService(repo)
+	outboxWorker := worker.NewOutboxWorker(repo, ch, q.Name)
+
+	// Start the Background Worker in a separate goroutine
+	go outboxWorker.Start(ctx)
+
+	// 5. HTTP Handler
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		// Backpressure Kontrolü
+		// Backpressure
 		select {
 		case semaphore <- struct{}{}:
-			// İşlem bitince semaforu serbest bırak
 			defer func() { <-semaphore }()
 		default:
-			// Semafor doluysa (Sistem aşırı yüklü) 503 dön
 			http.Error(w, "Service Unavailable - System Overloaded", http.StatusServiceUnavailable)
 			return
 		}
 
 		if r.Method != http.MethodPost {
 			w.WriteHeader(http.StatusOK)
-			fmt.Fprintf(w, "Interaction Ingestion Service is running.")
+			fmt.Fprintf(w, "Interaction Ingestion Service is running with Outbox Pattern.")
 			return
 		}
 
-		// Zero-Trust User ID Kontrolü
 		userUUID := r.Header.Get("x-user-uuid")
 		if userUUID == "" {
 			http.Error(w, "Unauthorized: Missing user UUID", http.StatusUnauthorized)
 			return
 		}
 
-		// Idempotency Key Kontrolü
 		idempotencyKey := r.Header.Get("Idempotency-Key")
 		if idempotencyKey == "" {
 			http.Error(w, "Bad Request: Missing Idempotency-Key header", http.StatusBadRequest)
 			return
 		}
 
-		// Redis üzerinden Idempotency kontrolü (24 saat TTL)
-		redisKey := "idempotency:" + idempotencyKey
-		exists, err := rdb.SetNX(ctx, redisKey, "processed", 24*time.Hour).Result()
-		if err != nil {
-			http.Error(w, "Internal Server Error: Redis check failed", http.StatusInternalServerError)
-			return
-		}
-
-		if !exists {
-			// Key zaten var. İstek daha önce işlenmiş (Duplicate).
-			// RabbitMQ'ya tekrar yazmadan başarılı yanıt dönüyoruz.
-			w.WriteHeader(http.StatusOK)
-			fmt.Fprintf(w, "Interaction already processed (Idempotent response)")
-			return
-		}
-
-		// JSON Parse İşlemi
-		var interaction Interaction
-		err = json.NewDecoder(r.Body).Decode(&interaction)
-		if err != nil {
-			// Hatalı veri durumunda Redis kaydını sil ki sistem düzeltilip tekrar denenebilsin
-			rdb.Del(ctx, redisKey)
+		var interaction model.Interaction
+		if err := json.NewDecoder(r.Body).Decode(&interaction); err != nil {
 			http.Error(w, "Invalid JSON payload", http.StatusBadRequest)
 			return
 		}
-
 		interaction.UserID = userUUID
 
-		body, err := json.Marshal(interaction)
+		// Pass to Service Layer
+		isNew, err := interactionService.Process(ctx, idempotencyKey, interaction)
 		if err != nil {
-			rdb.Del(ctx, redisKey)
-			http.Error(w, "Failed to encode message", http.StatusInternalServerError)
-			return
-		}
-
-		// RabbitMQ'ya gönder (Publish)
-		err = ch.Publish(
-			"",
-			q.Name,
-			false,
-			false,
-			amqp.Publishing{
-				ContentType: "application/json",
-				Body:        body,
-			})
-		if err != nil {
-			// RabbitMQ'ya yazılamazsa Redis kaydını sil
-			rdb.Del(ctx, redisKey)
-			http.Error(w, "Failed to publish a message", http.StatusInternalServerError)
+			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
 
 		w.WriteHeader(http.StatusOK)
-		fmt.Fprintf(w, "Interaction recorded and sent to queue")
+		if !isNew {
+			fmt.Fprintf(w, "Interaction already processed (Idempotent response)")
+		} else {
+			fmt.Fprintf(w, "Interaction securely recorded to Outbox")
+		}
 	})
 
 	port := ":3002"
 	fmt.Printf("Interaction Ingestion Service started on http://localhost%s\n", port)
-
 	if err := http.ListenAndServe(port, nil); err != nil {
 		log.Fatalf("Server failed to start: %v", err)
 	}
