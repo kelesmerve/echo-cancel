@@ -19,13 +19,56 @@ const NEO4J_URI = process.env.NEO4J_URI || 'bolt://localhost:7687';
 const NEO4J_USER = process.env.NEO4J_USER || 'neo4j';
 const NEO4J_PASSWORD = process.env.NEO4J_PASSWORD || 'password123';
 
-const REDIS_URL = process.env.REDIS_URL || 'redis://localhost:6379';
+const REDIS_URL = process.env.REDIS_URL || 'redis://localhost:6379/1';
 
 // --- İSTEMCİLERİ BAŞLAT ---
 const neo4jDriver = neo4j.driver(NEO4J_URI, neo4j.auth.basic(NEO4J_USER, NEO4J_PASSWORD));
 
+// Impression Cache için DB 1
 const redisClient = createClient({ url: REDIS_URL });
 redisClient.on('error', (err) => console.error('[Redis] Error:', err));
+
+// Yeni bir Redis Client oluştur (Feed Cache için DB 2)
+const feedCacheClient = createClient({ url: process.env.FEED_CACHE_REDIS_URL || 'redis://localhost:6379/2' });
+feedCacheClient.on('error', (err) => console.error('[Feed Cache Redis] Error:', err));
+// Başlangıçta bu client'ı da connect() etmeyi unutmayın.
+
+async function cacheUserFeed(userId: string) {
+    const session = neo4jDriver.session();
+    try {
+        // Feed Recommendation'daki mantığın aynısını buraya taşıyoruz
+        const query = `
+            MATCH (u:User {id: $userId})-[r:INTERESTED_IN]->(c:Category)
+            WITH c.name AS category, r.weight AS weight
+            ORDER BY weight DESC
+            LIMIT 2
+            WITH collect({category: category, type: 'personalized', weight: weight}) AS personalizedItems
+
+            MATCH (allCat:Category)
+            WHERE NOT EXISTS {
+                MATCH (u:User {id: $userId})-[r2:INTERESTED_IN]->(allCat)
+                WHERE r2.weight > 0.5
+            }
+            WITH allCat.name AS category, rand() AS randomSort, personalizedItems
+            ORDER BY randomSort
+            LIMIT 1
+            WITH personalizedItems, collect({category: category, type: 'discovery', weight: 'N/A'}) AS discoveryItems
+
+            RETURN personalizedItems + discoveryItems AS feed
+        `;
+
+        const result = await session.run(query, { userId });
+        const feed = result.records[0]?.get('feed') || [];
+
+        // Hesaplanmış feed'i Redis DB 2'ye yaz (Örn: 10 dakika TTL ile)
+        await feedCacheClient.setEx(`feed:${userId}`, 600, JSON.stringify(feed));
+        console.log(`[Cache] Kullanici (${userId}) feed'i onbellege alindi.`);
+    } catch (error) {
+         console.error('[Cache] Feed onbellege alinirken hata:', error);
+    } finally {
+        await session.close();
+    }
+}
 
 // --- SAGA PATTERN: NEO4J KULLANICI DÜĞÜMÜ (NODE) OLUŞTURMA ---
 async function createNeo4jUserNode(userId: string, displayName: string) {
@@ -132,6 +175,7 @@ async function connectRabbitMQ() {
                     if (eventData.eventType === 'UserCreated') {
                         console.log(`[Saga Consumer] RabbitMQ'dan UserCreated eventi yakalandi: ${eventData.userId}`);
                         await createNeo4jUserNode(eventData.userId, eventData.displayName);
+                        await cacheUserFeed(eventData.userId);
                     }
                 } catch (err) {
                     console.error('[!] Saga mesaji islenemedi:', err);
