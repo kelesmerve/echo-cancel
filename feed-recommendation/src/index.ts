@@ -2,7 +2,7 @@ import dotenv from 'dotenv';
 dotenv.config();
 
 import express from 'express';
-import neo4j from 'neo4j-driver';
+// import neo4j from 'neo4j-driver';
 import cors from 'cors';
 import { createClient } from 'redis';
 import client from 'prom-client';
@@ -74,6 +74,40 @@ app.get('/', async (req, res) => {
         console.log(`[Cache Miss] Feed Neo4j'den hesaplanıyor: ${userId}`);
         const session = driver.session();
 
+/*
+NOT: Neo4j bağlantısı ve sorguları artık Graph Updater Service'e taşındığı için bu servis sadece Redis Cache'i kullanarak feed önerisi yapacak şekilde basitleştirildi.
+// Docker Compose dosyamızdaki Neo4j bağlantı bilgileri
+const driver = neo4j.driver(
+    process.env.NEO4J_URI || 'bolt://localhost:7687',
+    neo4j.auth.basic(
+        process.env.NEO4J_USER || 'neo4j', 
+        process.env.NEO4J_PASSWORD || 'password123'
+    )
+);
+
+// Veritabanı bağlantı kontrolü
+driver.getServerInfo()
+    .then(info => {
+        console.log('Neo4j database connected successfully');
+    })
+    .catch(error => {
+        console.error('Neo4j connection error:', error);
+    });
+
+// Sağlık kontrolü endpoint'i
+app.get('/health', (req, res) => {
+    res.status(200).json({ 
+        message: 'Feed Recommendation Service is running'
+    });
+});
+
+// Asıl Algoritma Endpoint'i (Kök dizinde çalışır)
+app.get('/', async (req, res) => {
+    // Zero-Trust: API Gateway'den gelen user UUID
+    const userId = req.headers['x-user-uuid'] as string || 'test-user-uuid-1234';
+
+    const session = driver.session();
+    try {
         const query = `
             MATCH (u:User {id: $userId})-[r:INTERESTED_IN]->(c:Category)
             WITH c.name AS category, r.weight AS weight
@@ -122,3 +156,4 @@ app.get('/metrics', async (req, res) => {
 app.listen(PORT, () => {
     console.log(`Feed Recommendation Service started on http://localhost:${PORT}`);
 });
+*/
