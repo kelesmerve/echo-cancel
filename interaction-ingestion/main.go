@@ -15,6 +15,7 @@ import (
 	"interaction-ingestion/internal/worker"
 
 	"github.com/go-redis/redis/v8"
+	"github.com/prometheus/client_golang/prometheus/promhttp" // PROMETHEUS IMPORT EDILDI
 	amqp "github.com/rabbitmq/amqp091-go"
 )
 
@@ -25,7 +26,7 @@ const maxConcurrentRequests = 100
 var semaphore = make(chan struct{}, maxConcurrentRequests)
 
 func main() {
-	// 1. PostgreSQL Connection (Connecting to ingestion_db on port 5434)
+	// 1. PostgreSQL Connection
 	pgConnStr := os.Getenv("PG_URL")
 	if pgConnStr == "" {
 		pgConnStr = "postgres://admin:password123@localhost:5434/ingestion_db?sslmode=disable"
@@ -68,24 +69,34 @@ func main() {
 	}
 	defer ch.Close()
 
-	q, err := ch.QueueDeclare("interaction_events", true, false, false, false, nil)
+	err = ch.ExchangeDeclare(
+		"interaction_exchange", // name
+		"topic",                // type
+		true,                   // durable
+		false,                  // auto-deleted
+		false,                  // internal
+		false,                  // no-wait
+		nil,                    // arguments
+	)
 	if err != nil {
-		log.Fatalf("Failed to declare queue: %v", err)
+		log.Fatalf("Failed to declare exchange: %v", err)
 	}
-	fmt.Println("RabbitMQ connected successfully")
+	fmt.Println("RabbitMQ connected and exchange declared successfully")
 
 	// 4. Wire the Architecture Layers together
 	repo := repository.NewRepository(db, rdb)
-	err = repo.InitSchema() // Ensure outbox table exists
+	err = repo.InitSchema()
 	if err != nil {
 		log.Fatalf("Failed to initialize database schema: %v", err)
 	}
 
 	interactionService := service.NewInteractionService(repo)
-	outboxWorker := worker.NewOutboxWorker(repo, ch, q.Name)
+	outboxWorker := worker.NewOutboxWorker(repo, ch, "interaction_exchange")
 
-	// Start the Background Worker in a separate goroutine
 	go outboxWorker.Start(ctx)
+
+	// --- PROMETHEUS METRICS ENDPOINT ---
+	http.Handle("/metrics", promhttp.Handler())
 
 	// 5. HTTP Handler
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
@@ -123,7 +134,6 @@ func main() {
 		}
 		interaction.UserID = userUUID
 
-		// Pass to Service Layer
 		isNew, err := interactionService.Process(ctx, idempotencyKey, interaction)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)

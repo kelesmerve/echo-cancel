@@ -11,16 +11,16 @@ import (
 )
 
 type OutboxWorker struct {
-	repo    *repository.Repository
-	channel *amqp.Channel
-	queue   string
+	repo     *repository.Repository
+	channel  *amqp.Channel
+	exchange string
 }
 
-func NewOutboxWorker(repo *repository.Repository, channel *amqp.Channel, queue string) *OutboxWorker {
+func NewOutboxWorker(repo *repository.Repository, channel *amqp.Channel, exchange string) *OutboxWorker {
 	return &OutboxWorker{
-		repo:    repo,
-		channel: channel,
-		queue:   queue,
+		repo:     repo,
+		channel:  channel,
+		exchange: exchange,
 	}
 }
 
@@ -50,8 +50,8 @@ func (w *OutboxWorker) processPendingEvents(ctx context.Context) {
 
 	for _, event := range events {
 		err := w.channel.Publish(
-			"",
-			w.queue,
+			w.exchange,
+			"interaction.new",
 			false,
 			false,
 			amqp.Publishing{
