@@ -13,7 +13,11 @@ export const createUser = async (req: Request, res: Response) => {
         const user = await userService.createUser(userId, display_name, email);
         res.status(201).json({ message: "User created securely", user });
     } catch (err: any) {
-        if (err.code === '23505') return res.status(409).json({ error: 'Email already exists' });
+if (err.code === '23505') return res.status(409).json({ error: 'Email already exists' });
+        
+        // EKLENEN SATIR: Hatayı terminale yazdır
+        console.error('[Kritik Hata] createUser hatasi:', err); 
+        
         res.status(500).json({ error: 'Internal Server Error' });
     }
 };
