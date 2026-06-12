@@ -5,12 +5,17 @@ import express from 'express';
 import { Pool } from 'pg';
 import cors from 'cors';
 import amqp from 'amqplib';
+import client from 'prom-client';
 
 const app = express();
 const PORT = 3001;
 
 app.use(cors());
 app.use(express.json());
+
+// --- PROMETHEUS METRİKLERİ BAŞLATMA ---
+const collectDefaultMetrics = client.collectDefaultMetrics;
+collectDefaultMetrics({ register: client.register });
 
 // --- POSTGRESQL BAĞLANTISI ---
 const pool = new Pool({
@@ -25,7 +30,6 @@ const initDB = async () => {
     try {
         await pool.connect();
         console.log('PostgreSQL database connected successfully');
-        
 
         const queryText = `
             CREATE TABLE IF NOT EXISTS users (
@@ -75,7 +79,6 @@ router.post('/', async (req, res) => {
     }
 
     try {
-        // 1. Veritabanına Yaz (Local Transaction)
         const query = `
             INSERT INTO users (id, display_name, email)
             VALUES ($1, $2, $3)
@@ -83,7 +86,6 @@ router.post('/', async (req, res) => {
         `;
         const result = await pool.query(query, [userId, display_name, email]);
 
-        // 2. SAGA PATTERN: RabbitMQ'ya Event Fırlat (Choreography)
         if (rabbitChannel) {
             const sagaEvent = {
                 eventType: 'UserCreated',
@@ -91,11 +93,10 @@ router.post('/', async (req, res) => {
                 displayName: display_name,
                 timestamp: new Date().toISOString()
             };
-            
-            // saga_events isimli exchange'e gönderiyoruz
+
             rabbitChannel.publish(
-                'saga_events', 
-                'user.created', 
+                'saga_events',
+                'user.created',
                 Buffer.from(JSON.stringify(sagaEvent))
             );
             console.log(`[Saga] UserCreated eventi firlatildi: ${userId}`);
@@ -103,6 +104,7 @@ router.post('/', async (req, res) => {
 
         res.status(201).json({ message: "User created and Saga initiated", user: result.rows[0] });
     } catch (err: any) {
+        console.error('Error in POST /:', err);
         if (err.code === '23505') {
             return res.status(409).json({ error: 'Email already exists' });
         }
@@ -122,6 +124,12 @@ router.get('/', async (req, res) => {
 });
 
 app.use('/', router);
+
+// --- PROMETHEUS UÇ NOKTASI ---
+app.get('/metrics', async (req, res) => {
+    res.set('Content-Type', client.register.contentType);
+    res.end(await client.register.metrics());
+});
 
 app.listen(PORT, () => {
     console.log(`User Profile Service started on http://localhost:${PORT}`);

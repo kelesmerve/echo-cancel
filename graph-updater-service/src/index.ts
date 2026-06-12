@@ -5,13 +5,19 @@ import express from 'express';
 import amqp from 'amqplib';
 import neo4j from 'neo4j-driver';
 import { createClient } from 'redis';
+import client from 'prom-client';
 
 const app = express();
 const PORT = process.env.PORT ? parseInt(process.env.PORT) + 4 : 3004;
 
+// --- PROMETHEUS METRİKLERİ BAŞLATMA ---
+const collectDefaultMetrics = client.collectDefaultMetrics;
+collectDefaultMetrics({ register: client.register });
+
 // --- BAĞLANTI DEĞİŞKENLERİ ---
 const RABBITMQ_URL = process.env.RABBITMQ_URL || 'amqp://guest:guest@localhost:5672/';
-const INTERACTION_QUEUE = 'interaction_events';
+const INTERACTION_EXCHANGE = 'interaction_exchange';
+const INTERACTION_QUEUE = 'graph_updater_interaction_queue';
 const SAGA_EXCHANGE = 'saga_events';
 const SAGA_QUEUE = 'saga_user_creation_queue';
 
@@ -31,12 +37,10 @@ redisClient.on('error', (err) => console.error('[Redis] Error:', err));
 // Yeni bir Redis Client oluştur (Feed Cache için DB 2)
 const feedCacheClient = createClient({ url: process.env.FEED_CACHE_REDIS_URL || 'redis://localhost:6379/2' });
 feedCacheClient.on('error', (err) => console.error('[Feed Cache Redis] Error:', err));
-// Başlangıçta bu client'ı da connect() etmeyi unutmayın.
 
 async function cacheUserFeed(userId: string) {
     const session = neo4jDriver.session();
     try {
-        // Feed Recommendation'daki mantığın aynısını buraya taşıyoruz
         const query = `
             MATCH (u:User {id: $userId})-[r:INTERESTED_IN]->(c:Category)
             WITH c.name AS category, r.weight AS weight
@@ -60,17 +64,15 @@ async function cacheUserFeed(userId: string) {
         const result = await session.run(query, { userId });
         const feed = result.records[0]?.get('feed') || [];
 
-        // Hesaplanmış feed'i Redis DB 2'ye yaz (Örn: 10 dakika TTL ile)
         await feedCacheClient.setEx(`feed:${userId}`, 600, JSON.stringify(feed));
         console.log(`[Cache] Kullanici (${userId}) feed'i onbellege alindi.`);
     } catch (error) {
-         console.error('[Cache] Feed onbellege alinirken hata:', error);
+        console.error('[Cache] Feed onbellege alinirken hata:', error);
     } finally {
         await session.close();
     }
 }
 
-// --- SAGA PATTERN: NEO4J KULLANICI DÜĞÜMÜ (NODE) OLUŞTURMA ---
 async function createNeo4jUserNode(userId: string, displayName: string) {
     const session = neo4jDriver.session();
     try {
@@ -88,21 +90,15 @@ async function createNeo4jUserNode(userId: string, displayName: string) {
     }
 }
 
-// --- SAGA PATTERN: NEO4J KULLANICI DÜĞÜMÜNÜ (VE İLİŞKİLERİNİ) SİLME ---
 async function deleteNeo4jUserNode(userId: string) {
     const session = neo4jDriver.session();
     try {
-        // DETACH DELETE çok kritiktir: Sadece kullanıcıyı değil, 
-        // onun sahip olduğu tüm INTERESTED_IN (ilgi) bağlarını da siler.
         const query = `
             MATCH (u:User {id: $userId})
             DETACH DELETE u
         `;
         await session.run(query, { userId });
-        
-        // Kullanıcının Feed Cache'ini de Redis'ten (DB 2) temizliyoruz
         await feedCacheClient.del(`feed:${userId}`);
-        
         console.log(`[Neo4j] Saga Telafisi tamamlandi: Kullanici (${userId}) ve tum baglari sistemden silindi.`);
     } catch (error) {
         console.error('[Neo4j] Dugum silme hatasi (Saga telafisi basarisiz):', error);
@@ -111,28 +107,27 @@ async function deleteNeo4jUserNode(userId: string) {
     }
 }
 
-// --- FATIGUE PENALTY & DIW ALGORİTMASI ---
 async function processInteraction(userId: string, category: string, action: string) {
     const session = neo4jDriver.session();
     try {
         let weightDelta = 0;
 
         if (action === 'click' || action === 'like') {
-            weightDelta = 0.1; 
-        } 
+            weightDelta = 0.1;
+        }
         else if (action === 'impression') {
             const cacheKey = `impression:${userId}:${category}`;
             await redisClient.setEx(cacheKey, 60, 'true');
             console.log(`[Algoritma] Goruntuleme (Impression) hafizaya alindi: ${userId} -> ${category}`);
-            return; 
-        } 
+            return;
+        }
         else if (action === 'skip') {
             const cacheKey = `impression:${userId}:${category}`;
             const hadImpression = await redisClient.get(cacheKey);
 
             if (hadImpression) {
-                weightDelta = -0.2; 
-                await redisClient.del(cacheKey); 
+                weightDelta = -0.2;
+                await redisClient.del(cacheKey);
                 console.log(`[FATIGUE PENALTY] Devrede! Kullanici (${userId}) ${category} kategorisini gorup hemen gecti. Agir ceza kesiliyor.`);
             } else {
                 weightDelta = -0.05;
@@ -141,19 +136,37 @@ async function processInteraction(userId: string, category: string, action: stri
 
         if (weightDelta === 0) return;
 
+        // CASE ile Clamping uyguluyoruz: 0.0 - 1.0 arası sabit
         const query = `
             MERGE (u:User {id: $userId})
             MERGE (c:Category {name: $category})
             MERGE (u)-[r:INTERESTED_IN]->(c)
-            ON CREATE SET r.weight = 0.5 + $weightDelta
-            ON MATCH SET r.weight = r.weight + $weightDelta
+            SET r.weight = CASE 
+                WHEN r.weight IS NULL THEN 
+                    CASE 
+                        WHEN 0.5 + $weightDelta > 1.0 THEN 1.0
+                        WHEN 0.5 + $weightDelta < 0.0 THEN 0.0
+                        ELSE 0.5 + $weightDelta
+                    END
+                ELSE 
+                    CASE 
+                        WHEN r.weight + $weightDelta > 1.0 THEN 1.0
+                        WHEN r.weight + $weightDelta < 0.0 THEN 0.0
+                        ELSE r.weight + $weightDelta
+                    END
+            END
             RETURN r.weight as newWeight
         `;
 
         const result = await session.run(query, { userId, category, weightDelta });
         const newWeight = result.records[0]?.get('newWeight');
-        
+
         console.log(`[Neo4j] Kullanici: ${userId} | Kategori: ${category} | Yeni Agirlik: ${newWeight}`);
+
+        // 2. Cache Invalidation: Etkileşim olduğu an önbelleği uçur!
+        await feedCacheClient.del(`feed:${userId}`);
+        console.log(`[Cache Invalidation] Feed temizlendi: feed:${userId}`);
+
     } catch (error) {
         console.error('[Neo4j] Agirlik guncelleme hatasi:', error);
     } finally {
@@ -161,17 +174,17 @@ async function processInteraction(userId: string, category: string, action: stri
     }
 }
 
-// --- RABBITMQ DİNLEYİCİSİ (HEM ETKİLEŞİM HEM SAGA) ---
 async function connectRabbitMQ() {
     try {
         const connection = await amqp.connect(RABBITMQ_URL);
         const channel = await connection.createChannel();
 
-        // 1. Etkileşim Kuyruğunu Dinle (Interaction Events)
-        await channel.assertQueue(INTERACTION_QUEUE, { durable: true });
-        console.log(`RabbitMQ listening on queue: ${INTERACTION_QUEUE}`);
+        await channel.assertExchange(INTERACTION_EXCHANGE, 'topic', { durable: true });
+        const q = await channel.assertQueue(INTERACTION_QUEUE, { durable: true });
+        await channel.bindQueue(q.queue, INTERACTION_EXCHANGE, 'interaction.new');
+        console.log(`RabbitMQ listening on queue: ${q.queue} bound to ${INTERACTION_EXCHANGE}`);
 
-        channel.consume(INTERACTION_QUEUE, async (msg) => {
+        channel.consume(q.queue, async (msg) => {
             if (msg !== null) {
                 try {
                     const eventData = JSON.parse(msg.content.toString());
@@ -185,7 +198,6 @@ async function connectRabbitMQ() {
             }
         });
 
-        // 2. Saga Pattern Kuyruğunu Dinle (User Creation Events)
         await channel.assertExchange(SAGA_EXCHANGE, 'topic', { durable: true });
         await channel.assertQueue(SAGA_QUEUE, { durable: true });
         await channel.bindQueue(SAGA_QUEUE, SAGA_EXCHANGE, 'user.created');
@@ -220,13 +232,20 @@ app.get('/health', (req, res) => {
     res.status(200).json({ status: 'Graph Updater Service is running with Saga Consumer' });
 });
 
+// --- PROMETHEUS UÇ NOKTASI ---
+app.get('/metrics', async (req, res) => {
+    res.set('Content-Type', client.register.contentType);
+    res.end(await client.register.metrics());
+});
+
 app.listen(PORT, async () => {
     console.log(`Graph Updater Service started on http://localhost:${PORT}`);
-    
+
     try {
         await neo4jDriver.verifyConnectivity();
         console.log('Neo4j connected successfully.');
         await redisClient.connect();
+        await feedCacheClient.connect(); // DB 2 client'ı da başlatıyoruz
         console.log('Redis connected successfully for caching.');
     } catch (err) {
         console.error('Database connection error:', err);

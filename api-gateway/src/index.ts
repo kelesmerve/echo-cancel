@@ -5,11 +5,16 @@ import express from 'express';
 import cors from 'cors';
 import { createProxyMiddleware } from 'http-proxy-middleware';
 import { verifyToken } from './middlewares/auth';
+import client from 'prom-client';
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
 app.use(cors());
+
+// --- PROMETHEUS METRİKLERİ BAŞLATMA ---
+const collectDefaultMetrics = client.collectDefaultMetrics;
+collectDefaultMetrics({ register: client.register });
 
 // Yönlendirme (Routing) Tanımlamaları
 
@@ -35,6 +40,12 @@ app.use('/api/feed', verifyToken, createProxyMiddleware({
 // Healthcheck Endpoint'i
 app.get('/health', (req, res) => {
     res.status(200).json({ status: 'API Gateway is running' });
+});
+
+// --- PROMETHEUS UÇ NOKTASI (Her zaman listen'dan hemen önce) ---
+app.get('/metrics', async (req, res) => {
+    res.set('Content-Type', client.register.contentType);
+    res.end(await client.register.metrics());
 });
 
 app.listen(PORT, () => {
