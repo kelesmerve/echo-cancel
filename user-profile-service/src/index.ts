@@ -18,7 +18,7 @@ const pool = new Pool({
     host: process.env.DB_HOST || 'localhost',
     database: process.env.DB_NAME || 'userprofile_db',
     password: process.env.DB_PASSWORD || 'password123',
-    port: parseInt(process.env.DB_PORT || '5433', 10),
+    port: parseInt(process.env.DB_PORT || '5434', 10),
 });
 
 const initDB = async () => {

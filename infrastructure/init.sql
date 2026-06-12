@@ -1,0 +1,1 @@
+CREATE DATABASE ingestion_db;
