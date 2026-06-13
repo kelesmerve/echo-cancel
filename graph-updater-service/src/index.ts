@@ -8,7 +8,7 @@ import { createClient } from 'redis';
 import client from 'prom-client';
 
 const app = express();
-const PORT = process.env.PORT ? parseInt(process.env.PORT) + 4 : 3004;
+const PORT = 3004;
 
 // --- PROMETHEUS METRİKLERİ BAŞLATMA ---
 const collectDefaultMetrics = client.collectDefaultMetrics;

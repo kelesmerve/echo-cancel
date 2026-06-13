@@ -1,0 +1,474 @@
+{
+	"info": {
+		"_postman_id": "e305d21a-7b3b-4890-a7d1-05c0fcf95811",
+		"name": "EchoCancel API Collection",
+		"description": "API requests for testing EchoCancel microservices. Covers auth, user CRUD, Go interaction ingestion (with Redis idempotency), Neo4j weights, and feed recommendations.",
+		"schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+	},
+	"item": [
+		{
+			"name": "1. Authentication",
+			"item": [
+				{
+					"name": "Generate Dev Token",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"var jsonData = pm.response.json();",
+									"if (jsonData.token) {",
+									"    pm.collectionVariables.set(\"jwt_token\", jsonData.token);",
+									"    pm.test(\"Token saved successfully\", function () {",
+									"        pm.expect(pm.collectionVariables.get(\"jwt_token\")).to.not.be.undefined;",
+									"    });",
+									"}"
+								],
+								"type": "text/javascript",
+								"packages": {}
+							}
+						}
+					],
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json",
+								"type": "text"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n    \"userId\": \"{{userId}}\"\n}"
+						},
+						"url": {
+							"raw": "http://localhost:3000/api/auth/dev-token",
+							"protocol": "http",
+							"host": [
+								"localhost"
+							],
+							"port": "3000",
+							"path": [
+								"api",
+								"auth",
+								"dev-token"
+							]
+						},
+						"description": "Generates a JWT token for development purposes signed with JWT_SECRET and the provided userId."
+					},
+					"response": []
+				}
+			]
+		},
+		{
+			"name": "2. User Management (Saga & PG)",
+			"item": [
+				{
+					"name": "Create User",
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Authorization",
+								"value": "Bearer {{jwt_token}}",
+								"type": "text"
+							},
+							{
+								"key": "x-user-uuid",
+								"value": "{{userId}}",
+								"type": "text"
+							},
+							{
+								"key": "Content-Type",
+								"value": "application/json",
+								"type": "text"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n    \"display_name\": \"Postman User\",\n    \"email\": \"postman@gazi.edu.tr\"\n}"
+						},
+						"url": {
+							"raw": "http://localhost:3000/api/users",
+							"protocol": "http",
+							"host": [
+								"localhost"
+							],
+							"port": "3000",
+							"path": [
+								"api",
+								"users"
+							]
+						},
+						"description": "Registers a new user in PostgreSQL and triggers saga to create a matching node in Neo4j."
+					},
+					"response": []
+				},
+				{
+					"name": "Get User Profile",
+					"request": {
+						"method": "GET",
+						"header": [
+							{
+								"key": "Authorization",
+								"value": "Bearer {{jwt_token}}",
+								"type": "text"
+							},
+							{
+								"key": "x-user-uuid",
+								"value": "{{userId}}",
+								"type": "text"
+							}
+						],
+						"url": {
+							"raw": "http://localhost:3000/api/users",
+							"protocol": "http",
+							"host": [
+								"localhost"
+							],
+							"port": "3000",
+							"path": [
+								"api",
+								"users"
+							]
+						},
+						"description": "Retrieves the user profile from PostgreSQL using the verified JWT credentials."
+					},
+					"response": []
+				},
+				{
+					"name": "Update User Profile",
+					"request": {
+						"method": "PUT",
+						"header": [
+							{
+								"key": "Authorization",
+								"value": "Bearer {{jwt_token}}",
+								"type": "text"
+							},
+							{
+								"key": "x-user-uuid",
+								"value": "{{userId}}",
+								"type": "text"
+							},
+							{
+								"key": "Content-Type",
+								"value": "application/json",
+								"type": "text"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n    \"display_name\": \"Postman User Updated\"\n}"
+						},
+						"url": {
+							"raw": "http://localhost:3000/api/users",
+							"protocol": "http",
+							"host": [
+								"localhost"
+							],
+							"port": "3000",
+							"path": [
+								"api",
+								"users"
+							]
+						},
+						"description": "Updates display name for the user in PostgreSQL."
+					},
+					"response": []
+				},
+				{
+					"name": "Delete User (Saga Deletion)",
+					"request": {
+						"method": "DELETE",
+						"header": [
+							{
+								"key": "Authorization",
+								"value": "Bearer {{jwt_token}}",
+								"type": "text"
+							},
+							{
+								"key": "x-user-uuid",
+								"value": "{{userId}}",
+								"type": "text"
+							}
+						],
+						"url": {
+							"raw": "http://localhost:3000/api/users",
+							"protocol": "http",
+							"host": [
+								"localhost"
+							],
+							"port": "3000",
+							"path": [
+								"api",
+								"users"
+							]
+						},
+						"description": "Deletes the user from PostgreSQL and fires a UserDeleted Saga event to clean up Neo4j graph nodes and cache."
+					},
+					"response": []
+				}
+			]
+		},
+		{
+			"name": "3. Interactions Ingestion (Go & Redis)",
+			"item": [
+				{
+					"name": "Click Interaction (Weight +0.1)",
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Authorization",
+								"value": "Bearer {{jwt_token}}",
+								"type": "text"
+							},
+							{
+								"key": "x-user-uuid",
+								"value": "{{userId}}",
+								"type": "text"
+							},
+							{
+								"key": "Idempotency-Key",
+								"value": "click-{{$guid}}",
+								"type": "text"
+							},
+							{
+								"key": "Content-Type",
+								"value": "application/json",
+								"type": "text"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n    \"item_id\": \"post-101\",\n    \"category\": \"sports\",\n    \"action\": \"click\"\n}"
+						},
+						"url": {
+							"raw": "http://localhost:3000/api/interactions",
+							"protocol": "http",
+							"host": [
+								"localhost"
+							],
+							"port": "3000",
+							"path": [
+								"api",
+								"interactions"
+							]
+						},
+						"description": "Sends a click interaction. Increases edge weight by +0.1 in Neo4j."
+					},
+					"response": []
+				},
+				{
+					"name": "Impression Interaction (Caches for Fatigue)",
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Authorization",
+								"value": "Bearer {{jwt_token}}",
+								"type": "text"
+							},
+							{
+								"key": "x-user-uuid",
+								"value": "{{userId}}",
+								"type": "text"
+							},
+							{
+								"key": "Idempotency-Key",
+								"value": "imp-{{$guid}}",
+								"type": "text"
+							},
+							{
+								"key": "Content-Type",
+								"value": "application/json",
+								"type": "text"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n    \"item_id\": \"post-102\",\n    \"category\": \"music\",\n    \"action\": \"impression\"\n}"
+						},
+						"url": {
+							"raw": "http://localhost:3000/api/interactions",
+							"protocol": "http",
+							"host": [
+								"localhost"
+							],
+							"port": "3000",
+							"path": [
+								"api",
+								"interactions"
+							]
+						},
+						"description": "Submits an impression (view). Caches category impression in Redis (expires in 60s) to prepare for a potential skip."
+					},
+					"response": []
+				},
+				{
+					"name": "Skip Interaction (Fatigue Penalty -0.2)",
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Authorization",
+								"value": "Bearer {{jwt_token}}",
+								"type": "text"
+							},
+							{
+								"key": "x-user-uuid",
+								"value": "{{userId}}",
+								"type": "text"
+							},
+							{
+								"key": "Idempotency-Key",
+								"value": "skip-{{$guid}}",
+								"type": "text"
+							},
+							{
+								"key": "Content-Type",
+								"value": "application/json",
+								"type": "text"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n    \"item_id\": \"post-102\",\n    \"category\": \"music\",\n    \"action\": \"skip\"\n}"
+						},
+						"url": {
+							"raw": "http://localhost:3000/api/interactions",
+							"protocol": "http",
+							"host": [
+								"localhost"
+							],
+							"port": "3000",
+							"path": [
+								"api",
+								"interactions"
+							]
+						},
+						"description": "Submits a skip event. If an impression was registered in Redis within 60s, a fatigue penalty is applied, reducing the edge weight in Neo4j by -0.2."
+					},
+					"response": []
+				},
+				{
+					"name": "Idempotent Duplicate Test (Same Idempotency-Key)",
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Authorization",
+								"value": "Bearer {{jwt_token}}",
+								"type": "text"
+							},
+							{
+								"key": "x-user-uuid",
+								"value": "{{userId}}",
+								"type": "text"
+							},
+							{
+								"key": "Idempotency-Key",
+								"value": "static-idempotency-key-100",
+								"type": "text"
+							},
+							{
+								"key": "Content-Type",
+								"value": "application/json",
+								"type": "text"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n    \"item_id\": \"post-103\",\n    \"category\": \"sports\",\n    \"action\": \"click\"\n}"
+						},
+						"url": {
+							"raw": "http://localhost:3000/api/interactions",
+							"protocol": "http",
+							"host": [
+								"localhost"
+							],
+							"port": "3000",
+							"path": [
+								"api",
+								"interactions"
+							]
+						},
+						"description": "Submitting this request multiple times with the same Idempotency-Key header will result in an idempotent 200 OK response without enqueuing duplicate events."
+					},
+					"response": []
+				}
+			]
+		},
+		{
+			"name": "4. Feed & Recommendations",
+			"item": [
+				{
+					"name": "Get Personalised Feed",
+					"request": {
+						"method": "GET",
+						"header": [
+							{
+								"key": "Authorization",
+								"value": "Bearer {{jwt_token}}",
+								"type": "text"
+							},
+							{
+								"key": "x-user-uuid",
+								"value": "{{userId}}",
+								"type": "text"
+							}
+						],
+						"url": {
+							"raw": "http://localhost:3000/api/feed",
+							"protocol": "http",
+							"host": [
+								"localhost"
+							],
+							"port": "3000",
+							"path": [
+								"api",
+								"feed"
+							]
+						},
+						"description": "Requests feed generation. Checks Redis cache first. On miss, evaluates Neo4j interest weights, injects a randomized discovery category, caches the result in Redis, and returns the feed."
+					},
+					"response": []
+				}
+			]
+		}
+	],
+	"event": [
+		{
+			"listen": "prerequest",
+			"script": {
+				"type": "text/javascript",
+				"exec": [
+					""
+				]
+			}
+		},
+		{
+			"listen": "test",
+			"script": {
+				"type": "text/javascript",
+				"exec": [
+					""
+				]
+			}
+		}
+	],
+	"variable": [
+		{
+			"key": "userId",
+			"value": "postman-juri-007",
+			"type": "string"
+		},
+		{
+			"key": "jwt_token",
+			"value": "temporary-holder",
+			"type": "string"
+		}
+	]
+}
