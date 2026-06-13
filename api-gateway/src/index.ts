@@ -9,14 +9,14 @@ import jwt from 'jsonwebtoken';
 import client from 'prom-client';
 
 const app = express();
-const PORT = process.env.PORT || 3000;
+const PORT = 3000;
 
 app.use(cors());
 
 // YALNIZCA GELİŞTİRME İÇİN: Bize testlerimizde kullanmak üzere JWT üreten endpoint
 app.post('/api/auth/dev-token', express.json(), (req, res) => {
     const { userId } = req.body;
-    
+
     if (!userId) {
         return res.status(400).json({ error: 'Lütfen test için bir userId gönderin' });
     }
@@ -28,10 +28,10 @@ app.post('/api/auth/dev-token', express.json(), (req, res) => {
 
     // Gönderdiğimiz userId ile imzalanmış, 1 gün geçerli gerçek bir token üretiyoruz
     const token = jwt.sign({ userId }, JWT_SECRET, { expiresIn: '1d' });
-    
-    res.json({ 
+
+    res.json({
         message: "Test token'i basariyla uretildi",
-        token: token 
+        token: token
     });
 });
 // --- PROMETHEUS METRİKLERİ BAŞLATMA ---
@@ -41,22 +41,19 @@ collectDefaultMetrics({ register: client.register });
 // Yönlendirme (Routing) Tanımlamaları
 
 // 1. User Profile Service Yönlendirmesi
-app.use('/api/users', verifyToken, createProxyMiddleware({
-    target: 'http://localhost:3001',
-    changeOrigin: true,
+app.use('/api/users', createProxyMiddleware({
+    target: 'http://user-profile-service:3001',
+    changeOrigin: true
 }));
 
-// 2. Interaction Ingestion Service Yönlendirmesi
-app.use('/api/interactions', verifyToken, createProxyMiddleware({
-    target: 'http://localhost:3002',
-    changeOrigin: true,
-    pathRewrite: { '^/api/interactions': '/' } // Go servisine sadece / olarak gitmesi için eklendi
+app.use('/api/interactions', createProxyMiddleware({
+    target: 'http://interaction-ingestion:3002',
+    changeOrigin: true
 }));
 
-// 3. Feed Recommendation Service Yönlendirmesi
-app.use('/api/feed', verifyToken, createProxyMiddleware({
-    target: 'http://localhost:3003',
-    changeOrigin: true,
+app.use('/api/feed', createProxyMiddleware({
+    target: 'http://feed-recommendation-service:3003',
+    changeOrigin: true
 }));
 
 // Healthcheck Endpoint'i

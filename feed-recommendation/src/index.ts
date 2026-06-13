@@ -75,25 +75,23 @@ app.get('/', async (req, res) => {
         const session = driver.session();
 
          const query = `
+            MATCH (u:User {id: $userId})
+            
+            // 1. Favorileri Topla (Bulamazsa boş dizi döner, ana sorguyu silmez)
+            OPTIONAL MATCH (u)-[r:INTERESTED_IN]->(c:Category)
+            WITH u, c, r ORDER BY r.weight DESC
+            WITH u, collect(CASE WHEN c IS NOT NULL THEN {category: c.name, type: 'personalized', weight: r.weight} END)[0..2] AS personalizedItems
 
-            MATCH (u:User {id: $userId})-[r:INTERESTED_IN]->(c:Category)
-            WITH c.name AS category, r.weight AS weight
-            ORDER BY weight DESC
-            LIMIT 2
-            WITH collect({category: category, type: 'personalized', weight: weight}) AS personalizedItems
-
-
-            MATCH (allCat:Category)
-            WHERE NOT EXISTS {
-                MATCH (u:User {id: $userId})-[r2:INTERESTED_IN]->(allCat)
-
+            // 2. Fanus Kırıcıları Topla (Veritabanında başka kategori yoksa ana sorguyu silmez)
+            OPTIONAL MATCH (allCat:Category)
+            WHERE NOT EXISTS { 
+                MATCH (u)-[r2:INTERESTED_IN]->(allCat) 
+                WHERE r2.weight > 0.5 
             }
-            WITH allCat.name AS category, rand() AS randomSort, personalizedItems
-            ORDER BY randomSort
-            LIMIT 1
-            WITH personalizedItems, collect({category: category, type: 'discovery', weight: 'N/A'}) AS discoveryItems
+            WITH personalizedItems, allCat ORDER BY rand()
+            WITH personalizedItems, collect(CASE WHEN allCat IS NOT NULL THEN {category: allCat.name, type: 'discovery', weight: 'N/A'} END)[0..1] AS discoveryItems
 
-
+            // 3. İkisini güvenle birleştir
             RETURN personalizedItems + discoveryItems AS feed
         `;
 

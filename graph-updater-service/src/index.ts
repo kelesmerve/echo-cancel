@@ -38,6 +38,8 @@ redisClient.on('error', (err) => console.error('[Redis] Error:', err));
 const feedCacheClient = createClient({ url: process.env.FEED_CACHE_REDIS_URL || 'redis://localhost:6379/2' });
 feedCacheClient.on('error', (err) => console.error('[Feed Cache Redis] Error:', err));
 
+let rmqChannel: amqp.Channel | null = null;
+
 async function cacheUserFeed(userId: string) {
     const session = neo4jDriver.session();
     try {
@@ -86,6 +88,20 @@ async function createNeo4jUserNode(userId: string, displayName: string) {
         console.log(`[Neo4j] Saga tamamlandi: Baslangic Dugumu (Node) olusturuldu -> ${userId} (${displayName})`);
     } catch (error) {
         console.error('[Neo4j] Dugum olusturma hatasi (Saga basarisiz):', error);
+        if (rmqChannel) {
+            const rollbackPayload = {
+                userId,
+                eventType: 'UserCreationFailed',
+                timestamp: new Date().toISOString()
+            };
+            rmqChannel.publish(
+                'saga_events',
+                'user.creation_failed',
+                Buffer.from(JSON.stringify(rollbackPayload))
+            );
+            console.log(`[Saga] Telafi eventi (user.creation_failed) yayinlandi. User: ${userId}`);
+        }
+        throw error;
     } finally {
         await session.close();
     }
@@ -165,9 +181,6 @@ async function processInteraction(userId: string, category: string, action: stri
         console.log(`[Neo4j] Kullanici: ${userId} | Kategori: ${category} | Yeni Agirlik: ${newWeight}`);
 
         await cacheUserFeed(userId);
-        // 2. Cache Invalidation: Etkileşim olduğu an önbelleği uçur!
-        await feedCacheClient.del(`feed:${userId}`);
-        console.log(`[Cache Invalidation] Feed temizlendi: feed:${userId}`);
 
     } catch (error) {
         console.error('[Neo4j] Agirlik guncelleme hatasi:', error);
@@ -180,6 +193,7 @@ async function connectRabbitMQ() {
     try {
         const connection = await amqp.connect(RABBITMQ_URL);
         const channel = await connection.createChannel();
+        rmqChannel = channel;
 
         await channel.assertExchange(INTERACTION_EXCHANGE, 'topic', { durable: true });
         const q = await channel.assertQueue(INTERACTION_QUEUE, { durable: true });
@@ -203,7 +217,8 @@ async function connectRabbitMQ() {
         await channel.assertExchange(SAGA_EXCHANGE, 'topic', { durable: true });
         await channel.assertQueue(SAGA_QUEUE, { durable: true });
         await channel.bindQueue(SAGA_QUEUE, SAGA_EXCHANGE, 'user.created');
-        console.log(`RabbitMQ listening for Saga events on queue: ${SAGA_QUEUE}`);
+        await channel.bindQueue(SAGA_QUEUE, SAGA_EXCHANGE, 'user.deleted');
+        console.log(`RabbitMQ listening for Saga events on queue: ${SAGA_QUEUE} bound to user.created & user.deleted`);
 
         channel.consume(SAGA_QUEUE, async (msg) => {
             if (msg !== null) {

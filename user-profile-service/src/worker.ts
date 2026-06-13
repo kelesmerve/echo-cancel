@@ -6,7 +6,8 @@ import { pool } from './config/database';
 
 const RABBITMQ_URL = process.env.RABBITMQ_URL || 'amqp://guest:guest@localhost:5672/';
 
-async function startWorker() {
+// KRİTİK 1: 'export' kelimesi eklendi
+export async function startWorker() {
     let channel: amqp.Channel;
 
     try {
@@ -22,31 +23,27 @@ async function startWorker() {
 
     console.log('[Worker] Outbox Polling started. Looking for PENDING events...');
 
-    // Her 2 saniyede bir veritabanındaki "Posta Kutusunu" kontrol et
     setInterval(async () => {
         try {
-            // 1. Sadece PENDING olan kayıtları eskiden yeniye doğru al
             const res = await pool.query(
                 `SELECT * FROM outbox_events WHERE status = 'PENDING' ORDER BY created_at ASC`
             );
             const events = res.rows;
 
             for (const event of events) {
-                // 2. RabbitMQ'ya gönder
                 const routingKey = event.event_type === 'UserCreated' ? 'user.created' : 'user.deleted';
-                
+
                 channel.publish(
-                    'saga_events', 
-                    routingKey, 
+                    'saga_events',
+                    routingKey,
                     Buffer.from(JSON.stringify(event.payload))
                 );
 
-                // 3. SİLME, SADECE DURUMUNU GÜNCELLE (Audit Logging)
                 await pool.query(
-                    `UPDATE outbox_events SET status = 'PROCESSED' WHERE id = $1`, 
+                    `UPDATE outbox_events SET status = 'PROCESSED' WHERE id = $1`,
                     [event.id]
                 );
-                
+
                 console.log(`[Worker] Event islendi ve RabbitMQ'ya gonderildi. ID: ${event.id} | Type: ${event.event_type}`);
             }
         } catch (error) {
@@ -55,4 +52,4 @@ async function startWorker() {
     }, 2000);
 }
 
-startWorker();
+// KRİTİK 2: En alttaki startWorker(); çağrısını SİLDİK!
