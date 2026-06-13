@@ -250,9 +250,7 @@ app.listen(PORT, async () => {
         console.log('Redis connected successfully for caching (DB 1).');
 
         await feedCacheClient.connect();
-        console.log('Redis connected successfully for Feed Cache (DB 2).');    } catch (err) {
-        await feedCacheClient.connect(); // DB 2 client'ı da başlatıyoruz
-        console.log('Redis connected successfully for caching.');
+        console.log('Redis connected successfully for Feed Cache (DB 2).');
     } catch (err) {
         console.error('Database connection error:', err);
     }
